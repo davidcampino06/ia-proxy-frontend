@@ -1,32 +1,72 @@
+import { fmt, PLAN_COLORS, PLAN_NAMES } from '../api'
 import RequestPips from './RequestPips'
 import HistoryChart from './HistoryChart'
-
-const PLAN_COLOR = { FREE: '#5B6B82', PRO: '#6C3BD1', ENTERPRISE: '#A86A0C' }
-const fmt = (n) => n.toLocaleString('en-US')
+import DemoTools from './DemoTools'
+import PlanBadge from './PlanBadge'
 
 function formatDate(iso) {
   const [y, m, d] = iso.split('-').map(Number)
   return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })
 }
 
-export default function UsagePanel({ status, history, resetIn, rateLimited, onUpgrade }) {
+function daysUntil(iso) {
+  const [y, m, d] = iso.split('-').map(Number)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return Math.round((new Date(y, m - 1, d) - today) / 86400000)
+}
+
+export default function UsagePanel({
+  status, history, resetIn, rateLimited, busyAction, sending, onUpgrade, onBurst, onDemo,
+}) {
   if (!status) {
-    return <aside className="usage usage-loading">Loading your usage…</aside>
+    return (
+      <aside className="usage usage-loading" aria-busy="true">
+        <div className="skeleton skeleton-title" />
+        <div className="skeleton skeleton-number" />
+        <div className="skeleton skeleton-bar" />
+        <p>Loading your usage…</p>
+      </aside>
+    )
   }
 
-  const color = PLAN_COLOR[status.plan]
+  const color = PLAN_COLORS[status.plan]
   const unlimitedTokens = status.tokenLimit === null
   const pct = unlimitedTokens ? 0 : Math.min(100, (status.tokensUsed / status.tokenLimit) * 100)
   const level = pct >= 90 ? 'critical' : pct >= 70 ? 'warn' : 'ok'
+  const days = daysUntil(status.resetDate)
+  const todayTokens = history.length ? history[history.length - 1].tokens : 0
+  const avgDaily = history.length ? Math.round(history.reduce((s, d) => s + d.tokens, 0) / history.length) : 0
+  const daysLeftAtPace =
+    !unlimitedTokens && avgDaily > 0 ? Math.floor(status.tokensRemaining / avgDaily) : null
 
   return (
     <aside className="usage" aria-label="Your usage" style={{ '--plan': color }}>
-      <div className="usage-block">
+      <div className="usage-block plan-block">
+        <div>
+          <h2>Your plan</h2>
+          <p className="plan-line">
+            <PlanBadge plan={status.plan} size="lg" />
+          </p>
+          <p className="hint">
+            {status.requestsPerMinuteLimit === null ? 'Unlimited requests' : `${status.requestsPerMinuteLimit} requests per minute`}
+            {', '}
+            {unlimitedTokens ? 'unlimited tokens' : `${fmt(status.tokenLimit)} tokens per month`}
+          </p>
+        </div>
+        {status.plan !== 'ENTERPRISE' && (
+          <button className="upgrade-link" onClick={onUpgrade}>
+            Upgrade to {PLAN_NAMES[status.plan === 'FREE' ? 'PRO' : 'ENTERPRISE']}
+          </button>
+        )}
+      </div>
+
+      <div className={`usage-block ${level === 'critical' ? 'is-critical' : ''}`}>
         <h2>Tokens this month</h2>
         {unlimitedTokens ? (
           <>
             <p className="big-number">{fmt(status.tokensUsed)}</p>
-            <p className="hint">tokens used. Your plan has no monthly limit.</p>
+            <p className="hint">Tokens used. Your plan has no monthly limit.</p>
           </>
         ) : (
           <>
@@ -44,12 +84,31 @@ export default function UsagePanel({ status, history, resetIn, rateLimited, onUp
             >
               <span style={{ width: `${pct}%` }} />
             </div>
-            <p className="hint">
-              {fmt(status.tokensUsed)} of {fmt(status.tokenLimit)} used. Renews on{' '}
-              {formatDate(status.resetDate)}.
-            </p>
+            <div className="meter-legend">
+              <span>{fmt(status.tokensUsed)} used</span>
+              <span>{pct.toFixed(pct < 10 && pct > 0 ? 1 : 0)}%</span>
+            </div>
           </>
         )}
+        <dl className="facts">
+          <div>
+            <dt>Today</dt>
+            <dd>{fmt(todayTokens)} tokens</dd>
+          </div>
+          <div>
+            <dt>Renews</dt>
+            <dd>
+              {formatDate(status.resetDate)}
+              <small> in {days} {days === 1 ? 'day' : 'days'}</small>
+            </dd>
+          </div>
+          {daysLeftAtPace !== null && (
+            <div>
+              <dt>At your pace</dt>
+              <dd>{daysLeftAtPace >= days ? 'Lasts until renewal' : `Runs out in ~${daysLeftAtPace} days`}</dd>
+            </div>
+          )}
+        </dl>
       </div>
 
       <div className={`usage-block ${rateLimited ? 'is-blocked' : ''}`}>
@@ -59,12 +118,15 @@ export default function UsagePanel({ status, history, resetIn, rateLimited, onUp
             {status.requestsThisMinute}
             {status.requestsPerMinuteLimit !== null && <small> / {status.requestsPerMinuteLimit}</small>}
           </p>
-          <p className={`countdown ${rateLimited ? 'countdown-alert' : ''}`} aria-live="polite">
-            {rateLimited ? 'Blocked for ' : 'Resets in '}
+          <p className={`countdown ${rateLimited ? 'countdown-alert' : ''}`} aria-live="off">
+            {rateLimited ? 'Unlocks in ' : 'Resets in '}
             <strong>{resetIn}s</strong>
           </p>
         </div>
         <RequestPips used={status.requestsThisMinute} limit={status.requestsPerMinuteLimit} />
+        <div className="minute-bar" aria-hidden="true">
+          <span style={{ width: `${((60 - resetIn) / 60) * 100}%` }} />
+        </div>
       </div>
 
       <div className="usage-block">
@@ -72,11 +134,13 @@ export default function UsagePanel({ status, history, resetIn, rateLimited, onUp
         <HistoryChart history={history} color={color} />
       </div>
 
-      {status.plan !== 'ENTERPRISE' && (
-        <button className="upgrade-link" onClick={onUpgrade}>
-          {status.plan === 'FREE' ? 'Upgrade to Pro' : 'Upgrade to Enterprise'}
-        </button>
-      )}
+      <DemoTools
+        status={status}
+        busyAction={busyAction}
+        sending={sending}
+        onBurst={onBurst}
+        onDemo={onDemo}
+      />
     </aside>
   )
 }
